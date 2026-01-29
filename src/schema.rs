@@ -1,8 +1,17 @@
 use crate::parser::{Field, TypeInfo};
-use syn::{Attribute, Expr, Fields, ItemStruct, Lit, Meta, Type};
+use std::collections::HashMap;
+use syn::{Attribute, Expr, Fields, ItemEnum, ItemStruct, Lit, Meta, Type};
 
 /// Extract struct information including serde attributes
 pub fn extract_struct_info(item_struct: &ItemStruct) -> TypeInfo {
+    extract_struct_info_with_flatten(item_struct, &HashMap::new())
+}
+
+/// Extract struct information with flatten support
+pub fn extract_struct_info_with_flatten(
+    item_struct: &ItemStruct,
+    all_structs: &HashMap<String, TypeInfo>,
+) -> TypeInfo {
     let name = item_struct.ident.to_string();
     let mut fields = Vec::new();
 
@@ -16,6 +25,18 @@ pub fn extract_struct_info(item_struct: &ItemStruct) -> TypeInfo {
 
                 // Check if field should be skipped
                 if should_skip_field(&field.attrs) {
+                    continue;
+                }
+
+                // Check if field is flattened
+                if is_flattened_field(&field.attrs) {
+                    // Extract the type name and look it up
+                    let type_name = type_to_base_name(&field.ty);
+                    if let Some(flattened_type) = all_structs.get(&type_name) {
+                        // Merge all fields from the flattened struct
+                        fields.extend(flattened_type.fields.clone());
+                    }
+                    // If we can't find the struct, skip it (could be an external type)
                     continue;
                 }
 
@@ -45,6 +66,35 @@ pub fn extract_struct_info(item_struct: &ItemStruct) -> TypeInfo {
         name,
         fields,
         is_array: false,
+        is_enum: false,
+        enum_variants: vec![],
+        generic_args: vec![], // Structs defined in source don't have concrete generic args yet
+    }
+}
+
+/// Extract enum information including serde attributes
+pub fn extract_enum_info(item_enum: &ItemEnum) -> TypeInfo {
+    let name = item_enum.ident.to_string();
+    let mut enum_variants = Vec::new();
+
+    // Get enum-level rename_all attribute
+    let rename_all = get_serde_rename_all(&item_enum.attrs);
+
+    for variant in &item_enum.variants {
+        let original_name = variant.ident.to_string();
+
+        // Get the variant name (considering rename and rename_all)
+        let variant_name = get_field_json_name(&variant.attrs, &original_name, &rename_all);
+        enum_variants.push(variant_name);
+    }
+
+    TypeInfo {
+        name,
+        fields: vec![],
+        is_array: false,
+        is_enum: true,
+        enum_variants,
+        generic_args: vec![], // Enums defined in source don't have concrete generic args yet
     }
 }
 
@@ -132,6 +182,53 @@ fn should_skip_field(attrs: &[Attribute]) -> bool {
         }
     }
     false
+}
+
+/// Check if a field is flattened based on serde attributes
+fn is_flattened_field(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            if let Ok(meta_list) = attr.meta.require_list() {
+                if let Ok(nested) = meta_list.parse_args_with(
+                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                ) {
+                    for meta in nested {
+                        if let Meta::Path(path) = meta {
+                            if path.is_ident("flatten") {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extract just the base type name from a Type (e.g., "User" from "User" or "Option<User>")
+fn type_to_base_name(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                let type_name = segment.ident.to_string();
+
+                // If it's Option<T>, extract T
+                if type_name == "Option" {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                            return type_to_base_name(inner_type);
+                        }
+                    }
+                }
+
+                type_name
+            } else {
+                "unknown".to_string()
+            }
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 /// Apply rename_all convention to a field name
@@ -234,7 +331,17 @@ fn type_to_string(ty: &Type) -> String {
 
 /// Check if a struct has Serialize/Deserialize derives
 pub fn has_serde_derives(item_struct: &ItemStruct) -> bool {
-    for attr in &item_struct.attrs {
+    check_serde_derives(&item_struct.attrs)
+}
+
+/// Check if an enum has Serialize/Deserialize derives
+pub fn has_serde_derives_enum(item_enum: &ItemEnum) -> bool {
+    check_serde_derives(&item_enum.attrs)
+}
+
+/// Internal function to check for serde derives on attributes
+fn check_serde_derives(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
         if attr.path().is_ident("derive") {
             if let Ok(derive_input) = attr.parse_args::<syn::Meta>() {
                 let derive_str = format!("{:?}", derive_input);
@@ -448,5 +555,120 @@ mod tests {
 
         assert_eq!(type_info.fields[0].name, "userId"); // uses rename_all
         assert_eq!(type_info.fields[1].name, "custom_name"); // uses field rename
+    }
+
+    #[test]
+    fn test_flatten_support() {
+        // Create base struct
+        let base_struct: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            pub struct BaseFields {
+                pub id: u64,
+                pub created_at: String,
+            }
+        };
+
+        // Create struct with flatten
+        let with_flatten: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            pub struct User {
+                #[serde(flatten)]
+                pub base: BaseFields,
+                pub name: String,
+            }
+        };
+
+        // First extract base struct
+        let base_info = extract_struct_info(&base_struct);
+        let mut all_structs = HashMap::new();
+        all_structs.insert("BaseFields".to_string(), base_info);
+
+        // Extract struct with flatten
+        let user_info = extract_struct_info_with_flatten(&with_flatten, &all_structs);
+
+        // Should have 3 fields: id, created_at (from BaseFields), and name
+        assert_eq!(user_info.fields.len(), 3);
+        assert_eq!(user_info.fields[0].name, "id");
+        assert_eq!(user_info.fields[0].type_name, "u64");
+        assert_eq!(user_info.fields[1].name, "created_at");
+        assert_eq!(user_info.fields[1].type_name, "String");
+        assert_eq!(user_info.fields[2].name, "name");
+        assert_eq!(user_info.fields[2].type_name, "String");
+    }
+
+    #[test]
+    fn test_flatten_with_option() {
+        // Create base struct
+        let base_struct: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            pub struct Timestamps {
+                pub created_at: String,
+                pub updated_at: Option<String>,
+            }
+        };
+
+        // Create struct with optional flatten
+        let with_flatten: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            pub struct Record {
+                pub id: u64,
+                #[serde(flatten)]
+                pub timestamps: Option<Timestamps>,
+            }
+        };
+
+        // Extract base struct
+        let timestamps_info = extract_struct_info(&base_struct);
+        let mut all_structs = HashMap::new();
+        all_structs.insert("Timestamps".to_string(), timestamps_info);
+
+        // Extract struct with flatten
+        let record_info = extract_struct_info_with_flatten(&with_flatten, &all_structs);
+
+        // Should have 3 fields: id, created_at, updated_at
+        assert_eq!(record_info.fields.len(), 3);
+        assert_eq!(record_info.fields[0].name, "id");
+        assert_eq!(record_info.fields[1].name, "created_at");
+        assert_eq!(record_info.fields[2].name, "updated_at");
+    }
+
+    #[test]
+    fn test_flatten_with_rename_all() {
+        // Create base struct with rename_all
+        let base_struct: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            pub struct CommonFields {
+                pub user_id: u64,
+                pub first_name: String,
+            }
+        };
+
+        // Create struct with flatten
+        let with_flatten: ItemStruct = parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            #[serde(rename_all = "snake_case")]
+            pub struct UserProfile {
+                #[serde(flatten)]
+                pub common: CommonFields,
+                pub LastLogin: String,
+            }
+        };
+
+        // Extract base struct
+        let common_info = extract_struct_info(&base_struct);
+        let mut all_structs = HashMap::new();
+        all_structs.insert("CommonFields".to_string(), common_info);
+
+        // Extract struct with flatten
+        let profile_info = extract_struct_info_with_flatten(&with_flatten, &all_structs);
+
+        // Should have 3 fields
+        assert_eq!(profile_info.fields.len(), 3);
+        // Fields from flattened struct keep their original naming
+        assert_eq!(profile_info.fields[0].name, "userId"); // from CommonFields camelCase
+        assert_eq!(profile_info.fields[1].name, "firstName"); // from CommonFields camelCase
+                                                              // Own fields use parent's rename_all
+        assert_eq!(profile_info.fields[2].name, "last_login"); // snake_case applied
     }
 }

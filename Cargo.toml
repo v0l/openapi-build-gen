@@ -8,10 +8,15 @@ name = "openapi-build-gen"
 path = "src/main.rs"
 
 [dependencies]
-syn = { version = "2.0", features = ["full", "extra-traits"] }
-quote = "1.0"
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
 proc-macro2 = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
-walkdir = "2.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+walkdir = "2"
+openapiv3 = "2.2"
+indexmap = "2"
+
+[dev-dependencies]
+tempfile = "3"

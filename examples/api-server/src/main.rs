@@ -1,4 +1,5 @@
 use axum::http::header::CONTENT_TYPE;
+use axum::response::Html;
 use axum::{routing::get, Router};
 use std::net::SocketAddr;
 
@@ -23,8 +24,11 @@ async fn main() {
 }
 
 fn create_app() -> Router {
-    Router::new().merge(api::routes()).route(
-        "/openapi.json",
-        get(|| async { ([(CONTENT_TYPE, "application/json")], openapi::OPENAPI_JSON) }),
-    )
+    Router::new()
+        .merge(api::routes())
+        .route("/swagger", get(async || Html(include_str!("swagger.html"))))
+        .route(
+            "/openapi.json",
+            get(|| async { ([(CONTENT_TYPE, "application/json")], openapi::OPENAPI_JSON) }),
+        )
 }

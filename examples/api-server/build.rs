@@ -29,7 +29,4 @@ fn main() {
         .expect("Failed to write openapi.rs");
 
     println!("cargo:warning=OpenAPI spec generated at {:?}", openapi_rs);
-
-    // Tell Cargo to set an environment variable with the path
-    println!("cargo:rustc-env=OPENAPI_RS_PATH={}", openapi_rs.display());
 }

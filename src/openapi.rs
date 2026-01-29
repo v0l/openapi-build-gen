@@ -1,46 +1,13 @@
 use crate::parser::{HttpMethod, Route, TypeInfo};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use openapiv3::*;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Wrapper around openapiv3::OpenAPI with convenience methods
 pub struct OpenApiSpec {
-    pub openapi: String,
-    pub info: Info,
-    pub paths: HashMap<String, PathItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub components: Option<Components>,
+    pub spec: OpenAPI,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Info {
-    pub title: String,
-    pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact: Option<Contact>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub license: Option<License>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Contact {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct License {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-/// Builder for customizing OpenAPI Info
+/// Builder for customizing OpenAPI Info (keeping API compatibility)
 #[derive(Debug, Clone)]
 pub struct InfoBuilder {
     title: String,
@@ -72,7 +39,12 @@ impl InfoBuilder {
         url: Option<String>,
         email: Option<String>,
     ) -> Self {
-        self.contact = Some(Contact { name, url, email });
+        self.contact = Some(Contact {
+            name,
+            url,
+            email,
+            extensions: Default::default(),
+        });
         self
     }
 
@@ -80,6 +52,7 @@ impl InfoBuilder {
         self.license = Some(License {
             name: name.into(),
             url,
+            extensions: Default::default(),
         });
         self
     }
@@ -91,90 +64,10 @@ impl InfoBuilder {
             description: self.description,
             contact: self.contact,
             license: self.license,
+            terms_of_service: None,
+            extensions: Default::default(),
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PathItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub get: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub put: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delete: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub head: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<Operation>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Operation {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Vec<Parameter>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_body: Option<RequestBody>,
-    pub responses: HashMap<String, Response>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Parameter {
-    pub name: String,
-    #[serde(rename = "in")]
-    pub location: String,
-    pub required: bool,
-    pub schema: Schema,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RequestBody {
-    pub required: bool,
-    pub content: HashMap<String, MediaType>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<HashMap<String, MediaType>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MediaType {
-    pub schema: Schema,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Schema {
-    Ref {
-        #[serde(rename = "$ref")]
-        reference: String,
-    },
-    Object {
-        #[serde(rename = "type")]
-        type_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        properties: Option<HashMap<String, Schema>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        required: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        items: Option<Box<Schema>>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Components {
-    pub schemas: HashMap<String, Schema>,
 }
 
 impl OpenApiSpec {
@@ -182,7 +75,7 @@ impl OpenApiSpec {
         title: &str,
         version: &str,
         routes: Vec<Route>,
-        type_schemas: HashMap<String, TypeInfo>,
+        type_schemas: std::collections::HashMap<String, TypeInfo>,
     ) -> Self {
         Self::from_info(
             InfoBuilder::new(title, version).build(),
@@ -194,74 +87,92 @@ impl OpenApiSpec {
     pub fn from_info(
         info: Info,
         routes: Vec<Route>,
-        type_schemas: HashMap<String, TypeInfo>,
+        type_schemas: std::collections::HashMap<String, TypeInfo>,
     ) -> Self {
-        let mut paths: HashMap<String, PathItem> = HashMap::new();
+        let mut paths = Paths::default();
 
         for route in routes {
-            let path_item = paths.entry(route.path.clone()).or_insert(PathItem {
-                get: None,
-                post: None,
-                put: None,
-                delete: None,
-                patch: None,
-                head: None,
-                options: None,
-            });
+            let path_item = paths
+                .paths
+                .entry(route.path.clone())
+                .or_insert_with(|| ReferenceOr::Item(PathItem::default()));
 
-            let operation = create_operation(&route);
+            if let ReferenceOr::Item(path_item) = path_item {
+                let operation = create_operation(&route);
 
-            match route.method {
-                HttpMethod::Get => path_item.get = Some(operation),
-                HttpMethod::Post => path_item.post = Some(operation),
-                HttpMethod::Put => path_item.put = Some(operation),
-                HttpMethod::Delete => path_item.delete = Some(operation),
-                HttpMethod::Patch => path_item.patch = Some(operation),
-                HttpMethod::Head => path_item.head = Some(operation),
-                HttpMethod::Options => path_item.options = Some(operation),
+                match route.method {
+                    HttpMethod::Get => path_item.get = Some(operation),
+                    HttpMethod::Post => path_item.post = Some(operation),
+                    HttpMethod::Put => path_item.put = Some(operation),
+                    HttpMethod::Delete => path_item.delete = Some(operation),
+                    HttpMethod::Patch => path_item.patch = Some(operation),
+                    HttpMethod::Head => path_item.head = Some(operation),
+                    HttpMethod::Options => path_item.options = Some(operation),
+                }
             }
         }
 
         // Build component schemas from TypeInfo
         let components = if !type_schemas.is_empty() {
-            let mut schemas = HashMap::new();
+            let mut schemas = IndexMap::new();
             for (name, type_info) in type_schemas {
-                schemas.insert(name, build_schema_from_type_info(&type_info));
+                schemas.insert(
+                    name,
+                    ReferenceOr::Item(build_schema_from_type_info(&type_info)),
+                );
             }
-            Some(Components { schemas })
+            Some(Components {
+                schemas,
+                responses: Default::default(),
+                parameters: Default::default(),
+                examples: Default::default(),
+                request_bodies: Default::default(),
+                headers: Default::default(),
+                security_schemes: Default::default(),
+                links: Default::default(),
+                callbacks: Default::default(),
+                extensions: Default::default(),
+            })
         } else {
             None
         };
 
-        OpenApiSpec {
-            openapi: "3.0.0".to_string(),
+        let spec = OpenAPI {
+            openapi: "3.0.3".to_string(),
             info,
+            servers: vec![],
             paths,
             components,
-        }
+            security: None,
+            tags: vec![],
+            external_docs: None,
+            extensions: Default::default(),
+        };
+
+        OpenApiSpec { spec }
     }
 
     /// Update the Info section of the OpenAPI spec
     pub fn with_info(mut self, info: Info) -> Self {
-        self.info = info;
+        self.spec.info = info;
         self
     }
 
     /// Update the title
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.info.title = title.into();
+        self.spec.info.title = title.into();
         self
     }
 
     /// Update the version
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
-        self.info.version = version.into();
+        self.spec.info.version = version.into();
         self
     }
 
     /// Convert to JSON string
     pub fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string_pretty(self)?)
+        Ok(serde_json::to_string_pretty(&self.spec)?)
     }
 
     /// Write JSON to a file
@@ -299,18 +210,37 @@ impl OpenApiSpec {
 }
 
 fn build_schema_from_type_info(type_info: &TypeInfo) -> Schema {
-    if type_info.is_array {
-        return Schema::Object {
-            type_name: "array".to_string(),
-            properties: None,
-            required: None,
-            items: Some(Box::new(Schema::Ref {
-                reference: format!("#/components/schemas/{}", type_info.name),
+    // Handle enums
+    if type_info.is_enum {
+        return Schema {
+            schema_kind: SchemaKind::Type(Type::String(StringType {
+                enumeration: type_info
+                    .enum_variants
+                    .iter()
+                    .map(|v| Some(v.clone()))
+                    .collect(),
+                ..Default::default()
             })),
+            schema_data: Default::default(),
         };
     }
 
-    let mut properties = HashMap::new();
+    if type_info.is_array {
+        return Schema {
+            schema_kind: SchemaKind::Type(Type::Array(ArrayType {
+                items: Some(ReferenceOr::ref_(&format!(
+                    "#/components/schemas/{}",
+                    type_info.name
+                ))),
+                min_items: None,
+                max_items: None,
+                unique_items: false,
+            })),
+            schema_data: Default::default(),
+        };
+    }
+
+    let mut properties = IndexMap::new();
     let mut required_fields = Vec::new();
 
     for field in &type_info.fields {
@@ -318,18 +248,21 @@ fn build_schema_from_type_info(type_info: &TypeInfo) -> Schema {
             required_fields.push(field.name.clone());
         }
 
-        properties.insert(field.name.clone(), field_type_to_schema(&field.type_name));
+        properties.insert(
+            field.name.clone(),
+            ReferenceOr::boxed_item(field_type_to_schema(&field.type_name)),
+        );
     }
 
-    Schema::Object {
-        type_name: "object".to_string(),
-        properties: Some(properties),
-        required: if required_fields.is_empty() {
-            None
-        } else {
-            Some(required_fields)
-        },
-        items: None,
+    Schema {
+        schema_kind: SchemaKind::Type(Type::Object(ObjectType {
+            properties,
+            required: required_fields,
+            additional_properties: None,
+            min_properties: None,
+            max_properties: None,
+        })),
+        schema_data: Default::default(),
     }
 }
 
@@ -337,33 +270,47 @@ fn field_type_to_schema(type_name: &str) -> Schema {
     // Check for Vec<T> or array types
     if type_name.starts_with("Vec<") && type_name.ends_with('>') {
         let inner_type = &type_name[4..type_name.len() - 1];
-        return Schema::Object {
-            type_name: "array".to_string(),
-            properties: None,
-            required: None,
-            items: Some(Box::new(field_type_to_schema(inner_type))),
+        return Schema {
+            schema_kind: SchemaKind::Type(Type::Array(ArrayType {
+                items: Some(ReferenceOr::boxed_item(field_type_to_schema(inner_type))),
+                min_items: None,
+                max_items: None,
+                unique_items: false,
+            })),
+            schema_data: Default::default(),
         };
     }
 
-    let openapi_type = match type_name {
-        "String" | "str" => "string",
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "integer",
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "integer",
-        "f32" | "f64" => "number",
-        "bool" => "boolean",
+    match type_name {
+        "String" | "str" => Schema {
+            schema_kind: SchemaKind::Type(Type::String(StringType::default())),
+            schema_data: Default::default(),
+        },
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => Schema {
+            schema_kind: SchemaKind::Type(Type::Integer(IntegerType::default())),
+            schema_data: Default::default(),
+        },
+        "f32" | "f64" => Schema {
+            schema_kind: SchemaKind::Type(Type::Number(NumberType::default())),
+            schema_data: Default::default(),
+        },
+        "bool" => Schema {
+            schema_kind: SchemaKind::Type(Type::Boolean(BooleanType::default())),
+            schema_data: Default::default(),
+        },
         _ => {
-            // It's probably a reference to another schema
-            return Schema::Ref {
-                reference: format!("#/components/schemas/{}", type_name),
-            };
+            // For custom types, create a reference schema
+            Schema {
+                schema_kind: SchemaKind::OneOf {
+                    one_of: vec![ReferenceOr::ref_(&format!(
+                        "#/components/schemas/{}",
+                        type_name
+                    ))],
+                },
+                schema_data: Default::default(),
+            }
         }
-    };
-
-    Schema::Object {
-        type_name: openapi_type.to_string(),
-        properties: None,
-        required: None,
-        items: None,
     }
 }
 
@@ -372,97 +319,206 @@ fn create_operation(route: &Route) -> Operation {
 
     // Add path parameters
     for param in &route.path_params {
-        parameters.push(Parameter {
-            name: param.name.clone(),
-            location: "path".to_string(),
-            required: true,
-            schema: type_to_schema(&param.type_name),
-        });
+        parameters.push(ReferenceOr::Item(Parameter::Path {
+            parameter_data: ParameterData {
+                name: param.name.clone(),
+                description: None,
+                required: true,
+                deprecated: None,
+                format: ParameterSchemaOrContent::Schema(type_to_schema(&param.type_name)),
+                example: None,
+                examples: Default::default(),
+                explode: None,
+                extensions: Default::default(),
+            },
+            style: PathStyle::Simple,
+        }));
     }
 
     // Add query parameters
     for param in &route.query_params {
-        parameters.push(Parameter {
-            name: param.name.clone(),
-            location: "query".to_string(),
-            required: param.required,
-            schema: type_to_schema(&param.type_name),
-        });
+        parameters.push(ReferenceOr::Item(Parameter::Query {
+            parameter_data: ParameterData {
+                name: param.name.clone(),
+                description: None,
+                required: param.required,
+                deprecated: None,
+                format: ParameterSchemaOrContent::Schema(type_to_schema(&param.type_name)),
+                example: None,
+                examples: Default::default(),
+                explode: None,
+                extensions: Default::default(),
+            },
+            allow_reserved: false,
+            style: QueryStyle::Form,
+            allow_empty_value: None,
+        }));
     }
 
     // Create request body if present
     let request_body = route.request_body.as_ref().map(|type_info| {
-        let mut content = HashMap::new();
+        let mut content = IndexMap::new();
+        let schema_name = type_info.full_name(); // Use full_name() for generic types
+        let schema = if type_info.is_array {
+            ReferenceOr::Item(Schema {
+                schema_kind: SchemaKind::Type(Type::Array(ArrayType {
+                    items: Some(ReferenceOr::ref_(&format!(
+                        "#/components/schemas/{}",
+                        schema_name
+                    ))),
+                    min_items: None,
+                    max_items: None,
+                    unique_items: false,
+                })),
+                schema_data: Default::default(),
+            })
+        } else {
+            ReferenceOr::ref_(&format!("#/components/schemas/{}", schema_name))
+        };
+
         content.insert(
             "application/json".to_string(),
             MediaType {
-                schema: Schema::Ref {
-                    reference: format!("#/components/schemas/{}", type_info.name),
-                },
+                schema: Some(schema),
+                example: None,
+                examples: Default::default(),
+                encoding: Default::default(),
+                extensions: Default::default(),
             },
         );
-        RequestBody {
-            required: true,
+
+        ReferenceOr::Item(RequestBody {
+            description: None,
             content,
-        }
+            required: true,
+            extensions: Default::default(),
+        })
     });
 
     // Create responses
-    let mut responses = HashMap::new();
+    let mut responses = Responses::default();
 
     if let Some(type_info) = &route.response_body {
-        let mut content = HashMap::new();
+        let mut content = IndexMap::new();
+        let schema_name = type_info.full_name(); // Use full_name() for generic types
+        let schema = if type_info.is_array {
+            ReferenceOr::Item(Schema {
+                schema_kind: SchemaKind::Type(Type::Array(ArrayType {
+                    items: Some(ReferenceOr::ref_(&format!(
+                        "#/components/schemas/{}",
+                        schema_name
+                    ))),
+                    min_items: None,
+                    max_items: None,
+                    unique_items: false,
+                })),
+                schema_data: Default::default(),
+            })
+        } else {
+            ReferenceOr::ref_(&format!("#/components/schemas/{}", schema_name))
+        };
+
         content.insert(
             "application/json".to_string(),
             MediaType {
-                schema: Schema::Ref {
-                    reference: format!("#/components/schemas/{}", type_info.name),
-                },
+                schema: Some(schema),
+                example: None,
+                examples: Default::default(),
+                encoding: Default::default(),
+                extensions: Default::default(),
             },
         );
-        responses.insert(
-            "200".to_string(),
-            Response {
+
+        responses.responses.insert(
+            StatusCode::Code(200),
+            ReferenceOr::Item(Response {
                 description: "Successful response".to_string(),
-                content: Some(content),
-            },
+                content,
+                headers: Default::default(),
+                links: Default::default(),
+                extensions: Default::default(),
+            }),
         );
     } else {
-        responses.insert(
-            "200".to_string(),
-            Response {
+        responses.responses.insert(
+            StatusCode::Code(200),
+            ReferenceOr::Item(Response {
                 description: "Successful response".to_string(),
-                content: None,
+                content: Default::default(),
+                headers: Default::default(),
+                links: Default::default(),
+                extensions: Default::default(),
+            }),
+        );
+    }
+
+    // Add error response if present
+    if let Some(error_info) = &route.error_response {
+        let mut content = IndexMap::new();
+        let schema_name = error_info.full_name(); // Use full_name() for generic types
+        let schema = ReferenceOr::ref_(&format!("#/components/schemas/{}", schema_name));
+
+        content.insert(
+            "application/json".to_string(),
+            MediaType {
+                schema: Some(schema),
+                example: None,
+                examples: Default::default(),
+                encoding: Default::default(),
+                extensions: Default::default(),
             },
+        );
+
+        responses.responses.insert(
+            StatusCode::Code(500),
+            ReferenceOr::Item(Response {
+                description: "Internal server error".to_string(),
+                content,
+                headers: Default::default(),
+                links: Default::default(),
+                extensions: Default::default(),
+            }),
         );
     }
 
     Operation {
         summary: Some(route.handler.clone()),
         description: None,
-        parameters: if parameters.is_empty() {
-            None
-        } else {
-            Some(parameters)
-        },
+        parameters,
         request_body,
         responses,
+        tags: vec![],
+        deprecated: false,
+        security: None,
+        servers: vec![],
+        callbacks: Default::default(),
+        external_docs: None,
+        operation_id: None,
+        extensions: Default::default(),
     }
 }
 
-fn type_to_schema(type_name: &str) -> Schema {
-    let openapi_type = match type_name {
-        "String" | "str" => "string",
-        "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => "integer",
-        "f32" | "f64" => "number",
-        "bool" => "boolean",
-        _ => "string",
-    };
-
-    Schema::Object {
-        type_name: openapi_type.to_string(),
-        properties: None,
-        required: None,
-        items: None,
+fn type_to_schema(type_name: &str) -> ReferenceOr<Schema> {
+    match type_name {
+        "String" | "str" => ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::String(StringType::default())),
+            schema_data: Default::default(),
+        }),
+        "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::Integer(IntegerType::default())),
+            schema_data: Default::default(),
+        }),
+        "f32" | "f64" => ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::Number(NumberType::default())),
+            schema_data: Default::default(),
+        }),
+        "bool" => ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::Boolean(BooleanType::default())),
+            schema_data: Default::default(),
+        }),
+        _ => ReferenceOr::Item(Schema {
+            schema_kind: SchemaKind::Type(Type::String(StringType::default())),
+            schema_data: Default::default(),
+        }),
     }
 }
